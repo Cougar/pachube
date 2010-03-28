@@ -113,7 +113,7 @@ sub generate_xml()
 			} else {
 				$xmldata .= "      <tag>channel" . ($sensor % 100). "</tag>\n";
 			}
-			$xmldata .= "      <value>$sensorref->{$sensor}</value>\n";
+			$xmldata .= "      <value>" . sprintf("%d", $sensorref->{$sensor}) . "</value>\n";
 			$xmldata .= "      <unit type=\"derivedSI\" symbol=\"W\">" .
 		            "Watt</unit>\n";
 		}
@@ -203,7 +203,9 @@ sub collect_sensor_data()
                         $sec{$chid} += ($datats - $lastts{$chid});
 		        $lastts{$chid} = $datats;
 		}
-		$sensors{$chid} = sprintf("%d", $ws{$chid} / $sec{$chid});
+		my $watts = $ws{$chid} / $sec{$chid};
+		$sensors{$chid} = $watts;
+		$sensors{int($chid / 100) * 100} += $watts;
 	}
 
 	$sensors{($sensor + 1) * 100 + 99} = $temp;
