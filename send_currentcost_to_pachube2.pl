@@ -516,7 +516,7 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 		my $self = {};
 		shift;
 		if (@_) { $self->{_config} = shift } else { die "config missing" }
-		$self->{_apiurl} = "http://www.pachube.com/api/feeds/" . $self->{_config}{id} . ".xml";
+		$self->{_apiurl} = "http://api.pachube.com/v2/feeds/" . $self->{_config}{id} . ".xml";
 		bless($self);
 		return $self;
 	}
