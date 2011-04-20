@@ -767,12 +767,11 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 		my $xmldata = shift;
 
 		print "\nGoogle PowerMeter XML:\n" . $xmldata if ($verbose);
-		print "\nsending.." if ($verbose); open F, "| curl
-		--insecure --request POST --data-binary \@- --header
-		'Authorization: AuthSub token=\"" .  $self->{_token} .  "\"'
-		--header 'Content-Type: application/atom+xml'
-		https://www.google.com/powermeter/feeds/event"; print F
-		$xmldata; close F; print "sent\n" if ($verbose);
+		print "\nsending.." if ($verbose);
+		open F, "| curl --insecure --request POST --data-binary \@- --header 'Authorization: AuthSub token=\"" .  $self->{_token} .  "\"' --header 'Content-Type: application/atom+xml' https://www.google.com/powermeter/feeds/event";
+		print F $xmldata;
+		close F;
+		print "sent\n" if ($verbose);
 	}
 }
 
