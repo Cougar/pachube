@@ -1,0 +1,27 @@
+Files in this repository:
+
+*** README
+This one
+
+*** send_corecard_ds18x20_temp_to_pachube.pl
+Simple perl script to read data from CoreCard using debug port and
+send to Pachube
+
+*** send_currentcost_to_pachube.pl
+Perl script to read CurrentCost (CC128) data from serial port or via
+CoreCard canDaemon and send to Pachube
+
+*** send_currentcost_to_pachube2.pl
+The most complicated and the most interesting script. This is written
+in Perl (Object-Oriented way) and is able to send CurrentCost data to
+multiple colletors using multiple update intervals. Right now Pachube
+and Google PowerMeter are supported. Some more information about this
+script can be found at http://wiki.version6.net/pachube_currentcost
+
+
+*** send_currentcost_to_pachube.png
+Diagram of my home CurrentCost setup
+
+*** send_eth_stats_to_pachube.sh
+Simple perl script that sends internet usage statistics from OpenWRT
+based router to Pachube
