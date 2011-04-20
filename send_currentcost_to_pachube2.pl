@@ -67,6 +67,7 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 		$self->{_unit} = undef;
 		$self->{_value} = undef;
 		$self->{_timestamp} = undef;
+		$self->{_start_time} = 0;
 		$self->{_duration} = 0;		# 0 for snapshot
 		$self->{_usage} = 0;		# SUM (_value x _duration)
 		bless($self);
@@ -89,8 +90,19 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 	}
 	sub timestamp {
 		my $self = shift;
-		if (@_) { $self->{_timestamp} = shift }
+		if (@_) {
+			my $ts = shift;
+			$self->{_timestamp} = $ts;
+			if (! $self->start_time) {
+				$self->start_time($ts);
+			}
+		}
 		return $self->{_timestamp};
+	}
+	sub start_time {
+		my $self = shift;
+		if (@_) { $self->{_start_time} = shift }
+		return $self->{_start_time};
 	}
 	sub duration {
 		my $self = shift;
@@ -102,17 +114,52 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 		if (@_) { $self->{_usage} = shift }
 		return $self->{_usage};
 	}
-	sub add {
+	sub add { # add sequental measurements
 		my $self = shift;
-		if (! @_) { die "missing parameter" }
+		if (! @_) { die "\nmissing parameter" }
 		my $param = shift;
-		if ($self->id() != $param->id()) { die "channel ids MUST match" }
-		if ($self->unit() ne $param->unit()) { die "channel units MUST match" }
+		if ($self->id() != $param->id()) { die "\nchannel ids MUST match" }
+		if ($self->unit() ne $param->unit()) { die "\nchannel units MUST match" }
 		my $duration = $param->timestamp() - $self->timestamp();	# duration of old value
 		$self->duration($self->duration() + $duration);			# increase duration
 		$self->usage($self->usage() + ($self->value() * $duration));	# increase usage by last value times duration
 		$self->value($param->value());					# copy new value
 		$self->timestamp($param->timestamp());				# copy new timestamp
+	}
+	sub sum { # sum parallel measurements (used for total calculations)
+		my $self = shift;
+		if (! @_) { die "\nmissing parameter" }
+		my $param = shift;
+		if (defined $self->unit()) {
+			if ($self->unit() ne $param->unit()) { die "\nchannel units MUST match" }
+		} else {
+			$self->unit($param->unit());
+		}
+		if (defined $self->timestamp()) {
+			if ($self->timestamp() ne $param->timestamp()) { die "\nchannel timestamps MUST match" }
+		} else {
+			$self->timestamp($param->timestamp());
+		}
+		if ($self->start_time() > 0) {
+			if ($self->start_time() ne $param->start_time()) { die "\nchannel start_times MUST match: " . $self->start_time() . " != " . $param->start_time(); }
+		} else {
+			$self->start_time($param->start_time());
+		}
+		if ($self->duration() > 0) {
+			if ($self->duration() ne $param->duration()) { die "\nchannel durations MUST match" }
+		} else {
+			$self->duration($param->duration());
+		}
+		if (defined $self->value()) {
+			$self->value($self->value() + $param->value());		# add values
+		} else {
+			$self->value($param->value());
+		}
+		if (defined $self->usage()) {
+			$self->usage($self->usage() + $param->usage());		# add usages
+		} else {
+			$self->usage($param->usage());
+		}
 	}
 	sub clone {
 		my $self = shift;
@@ -121,6 +168,7 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 		$clone->unit($self->unit());
 		$clone->value($self->value());
 		$clone->timestamp($self->timestamp());
+		$clone->start_time($self->start_time());
 		$clone->duration($self->duration());
 		$clone->usage($self->usage());
 		return $clone;
@@ -128,10 +176,16 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 	sub printVerbose {
 		my $self = shift;
 		return unless ($verbose);
-		printf("\n  C:%1d %5d W", $self->id(), $self->value());
+		if (defined $self->id()) {
+			printf("\n  C:%1d %5d W", $self->id(), $self->value());
+		} else {
+			printf("\n  SUM %5d W", $self->value());
+		}
 		if ($self->duration) {
-			printf(" (since last update: %8d Ws, avg %5d W)",
+			printf(" (%4d sec: %8d Ws (%5.2f kWh), avg %5d W)",
+			       $self->timestamp - $self->start_time,
 			       $self->usage,
+			       $self->usage / 1000 / 3600,
 			       $self->usage / $self->duration);
 		}
 	}
@@ -169,7 +223,7 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 	}
 	sub isChannel {
 		my $self = shift;
-		if (!@_) { die "id missing" }
+		if (!@_) { die "\nid missing" }
 		my $id = shift;
 
 		if (! defined $self->{_channels}) {
@@ -193,7 +247,7 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 	}
 	sub add {
 		my $self = shift;
-		if (!@_) { die "sensor missing" }
+		if (!@_) { die "\nsensor missing" }
 		my $sensor = shift;
 		foreach my $channel ($sensor->listChannels()) {
 			my $ourchannel = $self->isChannel($channel->id());
@@ -221,22 +275,20 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 		my $self = shift;
 		return unless ($verbose);
 		print "\n S:" . $self->sensor() . " T:" . $self->tmpr() . " I:" . $self->id();
-		my $totalduration = 0;
-		my $totalusage = 0;
-		my $total = 0;
+		my $total;
 		my $channels = 0;
 		foreach my $i (0 .. (@{$self->{_channels}} - 1)) {
 			$self->{_channels}[$i]->printVerbose();
-			$totalduration += $self->{_channels}[$i]->duration();
-			$totalusage += $self->{_channels}[$i]->usage();
-			$total += $self->{_channels}[$i]->value();
+			if (! $channels) {
+				$total = $self->{_channels}[$i]->clone();
+				$total->id(undef);
+			} else {
+				$total->sum($self->{_channels}[$i]);
+			}
 			$channels ++;
 		}
-		printf("\n  SUM %5d W", $total);
-		if ($totalduration && $channels) {
-			printf(" (since last update: %8d Ws, sum %5d W)",
-			       $totalusage,
-			       ($totalusage / $totalduration) * $channels);
+		if ($channels > 1) {
+			$total->printVerbose();
 		}
 	}
 }
@@ -272,7 +324,7 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 	}
 	sub isSensor {
 		my $self = shift;
-		if (!@_) { die "id missing" }
+		if (!@_) { die "\nid missing" }
 		my $id = shift;
 
 		if (! defined $self->{_sensors}) {
@@ -296,7 +348,7 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 	}
 	sub add {
 		my $self = shift;
-		if (!@_) { die "network missing" }
+		if (!@_) { die "\nnetwork missing" }
 		my $network = shift;
 		foreach my $sensor ($network->listSensors()) {
 			my $oursensor = $self->isSensor($sensor->id());
@@ -510,12 +562,12 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 
 { package Output::Pachube;
 
-	our $creator="http://wiki.version6.net/pachube_currentcost";
+	our $creator = "http://wiki.version6.net/pachube_currentcost";
 
 	sub new {
 		my $self = {};
 		shift;
-		if (@_) { $self->{_config} = shift } else { die "config missing" }
+		if (@_) { $self->{_config} = shift } else { die "\nconfig missing" }
 		$self->{_apiurl} = "http://api.pachube.com/v2/feeds/" . $self->{_config}{id} . ".xml";
 		bless($self);
 		return $self;
@@ -545,48 +597,23 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 		$xmldata .= "    </location>\n ";
 
 		foreach my $sensor ($network->listSensors()) {
-			my $totalduration = 0;
-			my $totalusage = 0;
-			my $total = 0;
-			# hannel feeds [Scc]
+			my $totalchannel = undef;
+			# channel feeds [Scc]
 			foreach my $channel ($sensor->listChannels()) {
 				my $id = ($sensor->sensor() + 1) * 100 + $channel->id();
-				$xmldata .= "    <data id=\"" . $id . "\">\n ";
-				$xmldata .= "      <tag>CC128</tag>\n ";
-				# $xmldata .= "      <tag>currentcost</tag>\n ";
-				# $xmldata .= "      <tag>electricity</tag>\n ";
-				$xmldata .= "      <tag>power</tag>\n ";
-				# $xmldata .= "      <tag>watts</tag>\n ";
-				$xmldata .= "      <tag>channel" . $channel->id() . "</tag>\n ";
-				if ((my $duration = $channel->duration())) {
-					my $usage = $channel->usage();
-					$xmldata .= "      <value>" . sprintf("%d", $usage / $duration) . "</value>\n ";
-					$totalduration += $duration;
-					$totalusage += $usage;
+				$xmldata .= $self->_genXmlChannelData($channel, $id, "channel" . $channel->id(), "CC128", "power");
+				# add totals
+				if (! defined $totalchannel) {
+					$totalchannel = $channel->clone();
+					$totalchannel->id(undef);
 				} else {
-					$xmldata .= "      <value>" . sprintf("%d", $channel->value()) . "</value>\n ";
-					$total += $channel->value();
+					$totalchannel->sum($channel);
 				}
-				$xmldata .= "      <unit type=\"derivedSI\" symbol=\"W\">Watt</unit>\n ";
-				$xmldata .= "    </data>\n ";
 			}
 			# total feed [S00]
 			if (scalar($sensor->listChannels()) > 1) {
 				my $id = ($sensor->sensor() + 1) * 100;
-				$xmldata .= "    <data id=\"" . $id . "\">\n ";
-				$xmldata .= "      <tag>CC128</tag>\n ";
-				# $xmldata .= "      <tag>currentcost</tag>\n ";
-				# $xmldata .= "      <tag>electricity</tag>\n ";
-				$xmldata .= "      <tag>power</tag>\n ";
-				# $xmldata .= "      <tag>watts</tag>\n ";
-				$xmldata .= "      <tag>total</tag>\n ";
-				if ($totalduration) {
-					$xmldata .= "      <value>" . sprintf("%d", $totalusage / $totalduration) . "</value>\n ";
-				} else {
-					$xmldata .= "      <value>" . sprintf("%d", $total) . "</value>\n ";
-				}
-				$xmldata .= "      <unit type=\"derivedSI\" symbol=\"W\">Watt</unit>\n ";
-				$xmldata .= "    </data>\n ";
+				$xmldata .= $self->_genXmlChannelData($totalchannel, $id, "total", "CC128", "power");
 			}
 			# temperature feed [S99]
 			if ($sensor->tmpr) {
@@ -605,6 +632,25 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 		$xmldata .= "</eeml>\n ";
 
 		$self->_sendXml($xmldata);
+	}
+	sub _genXmlChannelData {
+		my $self = shift;
+		my $channel = shift;
+		my $id = shift;
+		my @tags = @_;
+
+		my $xmldata = "    <data id=\"" . $id . "\">\n ";
+		foreach my $tag (@tags) {
+			$xmldata .= "      <tag>" . $tag . "</tag>\n ";
+		}
+		if ((my $duration = $channel->duration())) {
+			$xmldata .= "      <value>" . sprintf("%d", $channel->usage() / $duration) . "</value>\n ";
+		} else {
+			$xmldata .= "      <value>" . sprintf("%d", $channel->value()) . "</value>\n ";
+		}
+		$xmldata .= "      <unit type=\"derivedSI\" symbol=\"W\">Watt</unit>\n ";
+		$xmldata .= "    </data>\n ";
+		return $xmldata;
 	}
 	sub _sendXml {
 		my $self = shift;
