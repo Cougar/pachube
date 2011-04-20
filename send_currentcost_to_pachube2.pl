@@ -45,6 +45,22 @@ This is real time feed i.e. every CC128 message will be posted here immediately"
 
 $conf->{my_realtime_feed}{sendrate} = 0;	# send data to pachube in real time (every 6 sec)
 
+### feed 3
+# For example, to generate token (and path) for 4 variables, go to link like this:
+# https://www.google.com/powermeter/device/activate?mfg=version6net&model=currentcost&did=1234567890&dvars=4&location=Alaska&title_0=L1&title_1=L2&title_2=L3&title_3=Total
+# after that extract token and path from activation information
+$conf->{powermeter_test}{destination}="powermeter";
+$conf->{powermeter_test}{token}="---powermeter-token---";
+$conf->{powermeter_test}{path}="---powermeter-path---";
+$conf->{powermeter_test}{sensormap}={	# "<sensor number>:<channel number>" => <powermeter-variable-number>
+	"0:1"		=>	1,
+	"0:2"		=>	2,
+	"0:3"		=>	3,
+	"0:TOTAL"	=>	4,
+};
+$conf->{powermeter_test}{sendrate} = 600;	# send data to google powermeter in 10 min interval (default)
+
+
 #############################################################################
 #
 # nothing to change after this line for normal users
@@ -675,6 +691,91 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 	}
 }
 
+{ package Output::GooglePowerMeter;
+	use POSIX qw(strftime);
+
+	our $uri = "https://www.google.com/powermeter/feeds";
+
+	sub new {
+		my $self = {};
+		shift;
+		if (@_) { $self->{_config} = shift } else { die "\nconfig missing" }
+		$self->{_token} = $self->{_config}{token};
+		$self->{_path} = $self->{_config}{path};
+		$self->{_sensormap} = $self->{_config}{sensormap};
+		bless($self);
+		return $self;
+	}
+	sub updateOutput() {
+		my $self = shift;
+		my $network = shift;
+
+		my $xmldata = "";
+
+		$xmldata .= "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+		$xmldata .= "<feed xmlns=\"http://www.w3.org/2005/Atom\"\n" .
+			    "      xmlns:meter=\"http://schemas.google.com/meter/2008\"\n" .
+			    "      xmlns:batch=\"http://schemas.google.com/gdata/batch\">\n";
+
+		foreach my $sensor ($network->listSensors()) {
+			my $totalchannel = undef;
+			my $totalvar = $self->{_sensormap}{ sprintf("%d:TOTAL", $sensor->sensor) };
+			foreach my $channel ($sensor->listChannels()) {
+				my $var = $self->{_sensormap}{ sprintf("%d:%d", $sensor->sensor, $channel->id) };
+				next unless (defined $var);
+				$xmldata .= $self->_genXmlChannelData($channel, $var, "C-" . $sensor->sensor . ":" . $channel->id . "-" . $var);
+				next unless (defined $totalvar);
+				# add totals only if needed
+				if (! defined $totalchannel) {
+					$totalchannel = $channel->clone();
+					$totalchannel->id(undef);
+				} else {
+					$totalchannel->sum($channel);
+				}
+			}
+			if ((scalar($sensor->listChannels()) > 1) && defined $totalvar) {
+				$xmldata .= $self->_genXmlChannelData($totalchannel, $totalvar, "C-" . $sensor->sensor . ":TOTAL-" . $totalvar);
+			}
+		}
+		$xmldata .= "</feed>\n";
+
+		$self->_sendXml($xmldata);
+	}
+	sub _genXmlChannelData {
+		my $self = shift;
+		my $channel = shift;
+		my $var = shift;
+		my $id = shift;
+
+		my $xmldata = "";
+		$xmldata .= "  <entry xmlns=\"http://www.w3.org/2005/Atom\"\n" .
+			    "      xmlns:meter=\"http://schemas.google.com/meter/2008\">\n";
+		$xmldata .= "    <category scheme=\"http://schemas.google.com/g/2005#kind\"\n" .
+			    "        term=\"http://schemas.google.com/meter/2008#durMeasurement\"/>\n";
+		$xmldata .= "    <meter:subject>\n" .
+			    "      " . $uri . $self->{_path} . ".d" . $var . "\n" .
+			    "    </meter:subject>\n" .
+			    "    <batch:id>" . $id . "</batch:id>\n" .
+			    "    <meter:startTime meter:uncertainty=\"1.0\">" .  POSIX::strftime("%Y-%m-%dT%H:%M:%S.000Z", gmtime($channel->start_time)) . "</meter:startTime>\n" .
+			    "    <meter:endTime meter:uncertainty=\"1.0\">" . POSIX::strftime("%Y-%m-%dT%H:%M:%S.000Z", gmtime($channel->start_time + $channel->duration)) . "</meter:endTime>\n" .
+			    "    <meter:quantity meter:uncertainty=\"0.001\" meter:unit=\"kW h\">" . sprintf("%.3f", $channel->usage / 1000 / 3600) . "</meter:quantity>\n" .
+			    "  </entry>\n";
+		return $xmldata;
+	}
+	sub _sendXml {
+		my $self = shift;
+		my $xmldata = shift;
+
+		print "\nGoogle PowerMeter XML:\n" . $xmldata if ($verbose);
+		print "\nsending.." if ($verbose); open F, "| curl
+		--insecure --request POST --data-binary \@- --header
+		'Authorization: AuthSub token=\"" .  $self->{_token} .  "\"'
+		--header 'Content-Type: application/atom+xml'
+		https://www.google.com/powermeter/feeds/event"; print F
+		$xmldata; close F; print "sent\n" if ($verbose);
+	}
+}
+
 # set up new DataReader
 my $datareader = DataReader::CC128->new();
 
@@ -689,6 +790,11 @@ foreach my $f (sort (keys %$conf)) {
 	if ($conf->{$f}{destination} eq "pachube") {
 		my $dispatcher = Output::Dispatcher->new();
 		my $output = Output::Pachube->new($conf->{$f});
+		$dispatcher->addNewOutput($output, defined $conf->{$f}{sendrate} ? $conf->{$f}{sendrate} : 0);
+		$datareader->addNewDispatcher($dispatcher);
+	} elsif ($conf->{$f}{destination} eq "powermeter") {
+		my $dispatcher = Output::Dispatcher->new();
+		my $output = Output::GooglePowerMeter->new($conf->{$f});
 		$dispatcher->addNewOutput($output, defined $conf->{$f}{sendrate} ? $conf->{$f}{sendrate} : 0);
 		$datareader->addNewDispatcher($dispatcher);
 	} else {
