@@ -4,8 +4,11 @@
 #
 my %config; my $conf = \%config;
 
-# Read data from USB port using CurrentCost data cable
-$conf->{serialport} = "/dev/ttyUSB0";
+$conf->{currentcost}{source}="currentcost";
+$conf->{currentcost}{serialport} = "/dev/cua/1";	# Read data from USB port using CurrentCost data cable
+$conf->{currentcost}{multipliers}={			# "<sensor number>:<channel number>" => <multiplier>
+	"1:1"	=>	2, # sensor1, channel 1 is digital development board, convert 500W -> 1000W
+};
 
 # Now you can configure multiple feeds
 
@@ -17,7 +20,7 @@ $conf->{feed1}{title}="Energy usage from CC128 via WL-500G";
 $conf->{feed1}{website}="http://wiki.version6.net/pachube_currentcost";
 $conf->{feed1}{descr}="CurrentCost CC128 data via ASUS WL500-G Premium serial port.
 
-ID format is [SCC] where [S] is sensor number and [CC] is channel number.
+ID format is [SCC] where [S] is (sensor number + 1) and [CC] is channel number.
 
 CC=00 is total of all channels, CC=99 is temperature of sensor.";
 $conf->{feed1}{locname}="Lonely island in the middle of nowhere";
@@ -34,7 +37,7 @@ $conf->{my_realtime_feed}{title}="Real Time Energy Usage From CC128 via WL-500G"
 $conf->{my_realtime_feed}{website}="http://wiki.version6.net/pachube_currentcost";
 $conf->{my_realtime_feed}{descr}="CurrentCost CC128 data via ASUS WL500-G Premium serial port.
 
-ID format is [SCC] where [S] is sensor number and [CC] is channel number.
+ID format is [SCC] where [S] is (sensor number + 1) and [CC] is channel number.
 
 CC=00 is total of all channels, CC=99 is temperature of sensor.
 
@@ -60,6 +63,14 @@ $conf->{powermeter_test}{sensormap}={	# "<sensor number>:<channel number>" => <p
 };
 $conf->{powermeter_test}{sendrate} = 600;	# send data to google powermeter in 10 min interval (default)
 
+### feed 4
+$conf->{powermeter_boiler}{destination}="powermeter";
+$conf->{powermeter_boiler}{token}="---powermeter-token---";
+$conf->{powermeter_boiler}{path}="---powermeter-path---";
+$conf->{powermeter_boiler}{sensormap}={	# "<sensor number>:<channel number>" => <powermeter-variable-number>
+	"1:1"		=>	1,
+};
+$conf->{powermeter_boiler}{sendrate} = 600;	# send data to google powermeter in 10 min interval (default)
 
 #############################################################################
 #
@@ -400,6 +411,9 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 { package DataReader::CC128;
 	sub new {
 		my $self = {};
+		shift;
+		if (@_) { $self->{_config} = shift } else { die "\nconfig missing" }
+		$self->{_multipliers} = $self->{_config}{multipliers};
 		$self->{_dispatcher} = ();
 		$self->{_network} = Data::Network->new();
 		$self->{_network}->id(0); # only one network supported right now
@@ -440,7 +454,11 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 			# DOES NOT WORK IF THERE IS MORE THAN ONE UNIT
 			foreach my $unit (sort (keys %{$ccdata->{"ch$ch"}})) {
 				$channel->unit($unit);
-				$channel->value($ccdata->{"ch$ch"}{$unit});
+				if (defined $self->{_multipliers} && defined $self->{_multipliers}{sprintf("%d:%d", $sensor->sensor, $channel->id)}) {
+					$channel->value($ccdata->{"ch$ch"}{$unit} * $self->{_multipliers}{sprintf("%d:%d", $sensor->sensor, $channel->id)});
+				} else {
+					$channel->value($ccdata->{"ch$ch"}{$unit});
+				}
 				$sensor->addChannel($channel);
 			}
 		}
@@ -768,21 +786,49 @@ my $verbose = (defined $ARGV[0] && $ARGV[0] eq "-q") ? 0 : 1;
 
 		print "\nGoogle PowerMeter XML:\n" . $xmldata if ($verbose);
 		print "\nsending.." if ($verbose);
-		open F, "| curl --insecure --request POST --data-binary \@- --header 'Authorization: AuthSub token=\"" .  $self->{_token} .  "\"' --header 'Content-Type: application/atom+xml' https://www.google.com/powermeter/feeds/event";
+		open F, "| curl --insecure --request POST --data-binary \@- --header 'Authorization: AuthSub token=\"" . $self->{_token} . "\"' --header 'Content-Type: application/atom+xml' https://www.google.com/powermeter/feeds/event";
 		print F $xmldata;
 		close F;
 		print "sent\n" if ($verbose);
 	}
 }
 
-# set up new DataReader
-my $datareader = DataReader::CC128->new();
+my $input;
+my $datareader;
 
-# read configuration
+# read source configuration
+foreach my $f (sort (keys %$conf)) {
+	next unless (ref($conf->{$f}) eq "HASH");
+	if (! defined $conf->{$f}{source}) {
+		print STDERR "WARNING: sensor \"$f\" source not defined, ignoring\n " unless (defined $conf->{$f}{destination});
+		next;
+	}
+
+	if ($conf->{$f}{source} eq "currentcost") {
+		# set up new DataReader
+		$datareader = DataReader::CC128->new($conf->{$f});
+
+		if (defined $conf->{$f}{serialport}) {
+			$input = Input::Serial->new($conf->{$f}{serialport});
+			$input->addNewDataReader($datareader);
+		} else {
+			print STDERR "You should configure 'serialport' for input \"$f\"\n";
+			print STDERR "reading data from STDIN now..\n";
+			$input = Input::TTY->new();
+			$input->addNewDataReader($datareader);
+		}
+		last;	# only one input is supported
+	} else {
+		print STDERR "WARNING: sensor \"$f\" source \"" . $conf->{$f}{source} . "\"is unknown, ignoring\n ";
+		next;
+	}
+}
+
+# read destination configuration
 foreach my $f (sort (keys %$conf)) {
 	next unless (ref($conf->{$f}) eq "HASH");
 	if (! defined $conf->{$f}{destination}) {
-		print STDERR "WARNING: feed \"$f\" destination not defined, ignoring\n ";
+		print STDERR "WARNING: feed \"$f\" destination not defined, ignoring\n " unless (defined $conf->{$f}{source});
 		next;
 	}
 
@@ -800,19 +846,6 @@ foreach my $f (sort (keys %$conf)) {
 		print STDERR "WARNING: feed \"$f\" destination \"" . $conf->{$f}{destination} . "\"is unknown, ignoring\n ";
 		next;
 	}
-}
-
-my $input;
-
-if (defined $conf->{serialport}) {
-	$input = Input::Serial->new($conf->{serialport});
-	$input->addNewDataReader($datareader);
-} else {
-	print STDERR "You should configure 'serialport'\n";
-	print STDERR "reading data from STDIN now..\n";
-	$input = Input::TTY->new();
-	$input->addNewDataReader($datareader);
-	exit;
 }
 
 $input->run();
